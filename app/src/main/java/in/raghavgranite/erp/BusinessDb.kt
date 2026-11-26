@@ -10,7 +10,7 @@ import java.math.RoundingMode
 
 data class StockItem(val id: String, val name: String, val category: String, val unit: String, val quantityMilli: Long, val avgCostPaise: Long, val lowStockMilli: Long)
 data class ProductionBatch(val id: String, val batchNumber: String, val date: String, val raw: Long, val crushed: Long, val dust: Long, val granite: Long, val costPaise: Long, val status: String, val operator: String?)
-data class Overview(val salesPaise: Long, val purchasesPaise: Long, val receivedPaise: Long, val paidPaise: Long, val receivablePaise: Long, val payablePaise: Long, val productionToday: Int, val totalStockMilli: Long, val lowStockCount: Int)
+data class Overview(val salesPaise: Long, val purchasesPaise: Long, val receivedPaise: Long, val paidPaise: Long, val receivablePaise: Long, val payablePaise: Long, val productionToday: Int, val totalStockMilli: Long, val lowStockCount: Long)
 
 class BusinessDb(context: Context) : SQLiteOpenHelper(context, "raghav-granite.db", null, 1) {
     override fun onConfigure(db: SQLiteDatabase) { db.setForeignKeyConstraintsEnabled(true) }
@@ -71,7 +71,7 @@ class BusinessDb(context: Context) : SQLiteOpenHelper(context, "raghav-granite.d
         val pay = sum("SELECT COALESCE(SUM(total_paise-paid_paise),0) FROM purchase_documents WHERE status!='draft'")
         val stock = sum("SELECT COALESCE(SUM(quantity_milli),0) FROM inventory")
         val low = sum("SELECT COUNT(*) FROM products p JOIN inventory i ON p.id=i.product_id WHERE p.low_stock_milli>0 AND i.quantity_milli<=p.low_stock_milli")
-        val today = sum("SELECT COUNT(*) FROM production_batches WHERE approval_status='approved' AND date(produced_at)=date('now','localtime')").toInt()
+        val today = sum("SELECT COUNT(*) FROM production_batches WHERE approval_status='approved' AND date(produced_at)=date('now','localtime')").coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
         return Overview(sales,purchases,received,paid,recv,pay,today,stock,low)
     }
 
@@ -107,8 +107,7 @@ class BusinessDb(context: Context) : SQLiteOpenHelper(context, "raghav-granite.d
             val rawProduct = row[0]; val raw = row[1].toLong(); val crushed = row[2].toLong(); val dust = row[3].toLong(); val granite = row[4].toLong(); val cost = row[5].toLong()
             val metrics = DomainRules.production(raw,crushed,dust,granite,cost)
             changeStock(db,rawProduct,-raw,"production_input","production",batchId,"Approved production batch",0)
-            val unitCost = if (metrics.outputMilli == 0L) 0 else BigDecimal.valueOf(cost).multiply(BigDecimal.valueOf(1000))
-                .divide(BigDecimal.valueOf(metrics.outputMilli), 0, RoundingMode.HALF_UP).longValueExact()
+            val unitCost = if (metrics.outputMilli == 0L) 0 else BigDecimal.valueOf(cost).multiply(BigDecimal.valueOf(1000)).divide(BigDecimal.valueOf(metrics.outputMilli), 0, RoundingMode.HALF_UP).longValueExact()
             listOf("crushed-stone" to crushed,"stone-dust" to dust,"granite" to granite).forEach { (product,qty) ->
                 if (qty > 0) changeStock(db,product,qty,"production_output","production",batchId,"Production batch output",unitCost)
             }
@@ -126,13 +125,12 @@ class BusinessDb(context: Context) : SQLiteOpenHelper(context, "raghav-granite.d
             val previous = db.rawQuery("SELECT product_id,quantity_milli,stock_applied FROM dispatches WHERE id=?",arrayOf(dispatchId)).use { c ->
                 if (c.moveToFirst()) Triple(c.getString(0),c.getLong(1),c.getInt(2) == 1) else null
             }
-            if (previous?.third == true) changeStock(db,previous.first,previous.second,"dispatch_edit_restore","dispatch_edit",uuid(),"Restore before editing dispatch",0)
+            if (previous?.third == true) changeStock(db,previous.first,-previous.second,"dispatch_edit_restore","dispatch_edit",uuid(),"Restore before editing dispatch",0)
             val values = ContentValues().apply {
                 put("id",dispatchId); put("customer_id",customer); put("buyer_registration",registration.trim().uppercase()); put("product_id",productId); put("quantity_milli",quantity)
                 put("gross_weight_milli",gross); put("tare_weight_milli",tare); put("net_weight_milli",net); put("loaded_at",now()); put("status","draft"); put("stock_applied",0); put("created_at",now())
             }
             db.insertWithOnConflict("dispatches",null,values,SQLiteDatabase.CONFLICT_REPLACE)
-            // Buyer-owned vehicles are stored on dispatches only; no fleet or vehicle expense row is created.
             changeStock(db,productId,-quantity,"dispatch","dispatch",uuid(),"Buyer collection dispatch",0)
             val posted = ContentValues().apply { put("stock_applied",1); put("status","loaded") }
             db.update("dispatches",posted,"id=?",arrayOf(dispatchId))
